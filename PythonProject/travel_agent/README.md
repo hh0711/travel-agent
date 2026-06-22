@@ -27,13 +27,12 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 只负责串联数据和生成行程。
 
 ```env
-# 墨迹天气
-MOJI_WEATHER_URL=你的墨迹天气接口地址
-MOJI_METHOD=GET
-MOJI_CITY_PARAM=city
-MOJI_DAYS_PARAM=days
-MOJI_API_KEY=你的墨迹天气key
-MOJI_KEY_PARAM=key
+# 中国天气网 WeatherDT
+WEATHERDT_URL=http://api.weatherdt.com/common/
+WEATHERDT_METHOD=GET
+WEATHERDT_TYPE=forecast|observe|alarm|air
+WEATHERDT_KEY=你的WeatherDT密钥
+WEATHERDT_AREA_MAP_JSON={"北京":"101010100","上海":"101020100","苏州":"101190401"}
 
 # 美团酒旅助手 Skill
 MEITUAN_SKILL_MODE=cli
@@ -99,7 +98,7 @@ python -m travel_agent.app
 
 ## 后续接入
 
-- `travel_agent/tools/weather.py`: 墨迹天气接口适配
+- `travel_agent/tools/weather.py`: 中国天气网 WeatherDT 接口适配
 - `travel_agent/tools/meituan_skill.py`: 美团酒旅 Skills 适配
 - `travel_agent/tools/food.py`: 餐厅搜索
 - `travel_agent/tools/hotel.py`: 酒店搜索
