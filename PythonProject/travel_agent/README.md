@@ -96,6 +96,91 @@ python -m travel_agent.app
 周末去苏州玩两天，预算1500，想吃本地菜，住宿不要太贵
 ```
 
+## macOS 全新环境运行
+
+在一台新的 macOS 机器上运行前，先准备 Python、Git、Node.js 和 npm：
+
+```bash
+python3 --version
+git --version
+node --version
+npm --version
+```
+
+如果本机没有这些工具，可以用 Homebrew 安装：
+
+```bash
+brew install python git node
+```
+
+拉取项目并安装 Python 依赖：
+
+```bash
+git clone https://github.com/hh0711/travel-agent.git
+cd travel-agent/PythonProject
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+复制环境变量文件并填写密钥：
+
+```bash
+cp .env.example .env
+```
+
+`.env` 至少需要配置大模型：
+
+```env
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=你的DeepSeek key
+DEEPSEEK_MODEL=deepseek-v4-pro
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+```
+
+如果要启用美团酒旅助手，macOS 中 `MEITUAN_TRAVEL_CLI` 使用 `mttravel`：
+
+```env
+MEITUAN_SKILL_MODE=cli
+MEITUAN_TRAVEL_CLI=mttravel
+MEITUAN_DEFAULT_CITY=北京
+MEITUAN_SKILL_ACCESS_TOKEN=你的美团token
+MEITUAN_SKILL_LIMIT=8
+MEITUAN_SKILL_TIMEOUT=150
+```
+
+安装并验证美团 CLI：
+
+```bash
+npm install -g @meituan-travel/travel-cli
+which mttravel
+mttravel 北京 "推荐苏州两日游行程规划"
+```
+
+如果要启用 WeatherDT 天气兜底接口，还需要配置：
+
+```env
+WEATHERDT_URL=http://api.weatherdt.com/common/
+WEATHERDT_METHOD=GET
+WEATHERDT_TYPE=forecast|observe|alarm|air
+WEATHERDT_KEY=你的WeatherDT密钥
+WEATHERDT_AREA_MAP_JSON={"北京":"101010100","上海":"101020100","苏州":"101190401"}
+```
+
+运行程序：
+
+```bash
+source .venv/bin/activate
+python -m travel_agent.app
+```
+
+注意事项：
+
+- 不要提交 `.env`，其中包含 API key 和 token。
+- macOS 中不要使用 Windows 的 `mttravel.cmd`。
+- 如果终端中文输出异常，可以先执行 `export PYTHONIOENCODING=utf-8`。
+- 如果 `mttravel` 找不到，检查 `npm` 全局路径是否在 `PATH` 中。
+
 ## 后续接入
 
 - `travel_agent/tools/weather.py`: 中国天气网 WeatherDT 接口适配
