@@ -21,6 +21,8 @@ ENV/
 *.swp
 *.swo
 .DS_Store
+__MACOSX/
+**/._*
 
 # Build / Distribution
 build/

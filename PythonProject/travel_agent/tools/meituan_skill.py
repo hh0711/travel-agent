@@ -515,6 +515,15 @@ def search_meituan_travel(
     if people:
         details.append(f"人数：{people}")
 
+    day_text = f"{days}日游" if days else "旅游"
+    query_parts = [
+        f"{destination}{day_text}行程规划",
+        "请包含可预订酒店、景点路线、午餐晚餐或本地美食建议",
+        "酒店和可预订项目优先给出美团链接",
+        "如果有美食或餐饮链接也一并给出",
+        "；".join(details),
+    ]
+
     payload = {
         "intent": "travel_food_hotel_search",
         "destination": destination,
@@ -523,14 +532,7 @@ def search_meituan_travel(
         "preferences": preferences,
         "keyword": f"{hotel_keyword}、{food_keyword}",
         "limit": env_int("MEITUAN_SKILL_LIMIT", 6),
-        "user_query": (
-            "请基于美团真实酒旅数据，推荐适合旅行规划的酒店住宿和本地餐厅，"
-            "每一家酒店和餐厅都必须带美团详情页链接，方便用户后续点击跳转；"
-            "餐厅请尽量给出5到6家可参考候选，覆盖午餐、晚餐、特色菜、排队或预约提醒；"
-            "酒店请尽量给出3到4家可参考候选，并详细说明商圈/地址、距离景点或地铁的便利性、"
-            "价格、评分、星级/档次、开业或装修时间、房型/设施亮点、适合人群、推荐理由和链接；"
-            + "；".join(details)
-        ),
+        "user_query": "；".join(query_parts),
     }
     tool_name = os.getenv("MEITUAN_TRAVEL_ASSISTANT_TOOL", "travel_assistant")
     return _invoke_skill(tool_name, payload, provider="meituan_travel_skill")
