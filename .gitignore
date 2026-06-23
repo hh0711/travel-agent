@@ -38,3 +38,7 @@ htmlcov/
 # Logs
 *.log
 logs/
+
+# Local memory
+PythonProject/travel_agent/memory/profile.json
+PythonProject/travel_agent/memory/conversations/
