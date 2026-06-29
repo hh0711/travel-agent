@@ -41,4 +41,5 @@ logs/
 
 # Local memory
 PythonProject/travel_agent/memory/profile.json
+PythonProject/travel_agent/memory/profiles/
 PythonProject/travel_agent/memory/conversations/

@@ -10,8 +10,10 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
 from travel_agent.memory.profile_store import load_profile, update_profile
+from travel_agent.rag.obsidian_knowledge import retrieve_knowledge, save_turn_knowledge
 from travel_agent.state import TravelState
 from travel_agent.tools.meituan_skill import search_meituan_travel
+from travel_agent.tools.meituan_parser import extract_meituan_entities, meituan_content
 from travel_agent.tools.transport import search_transport
 from travel_agent.tools.weather import get_weather
 from travel_agent.tools.xiaohongshu import search_xiaohongshu
@@ -69,6 +71,55 @@ def _conversation_prompt(history: List[Dict[str, str]], limit: int = 8) -> str:
             content = content[:900] + "..."
         lines.append(f"{role}: {content}")
     return "\n".join(lines) or "无"
+
+
+def _last_assistant_message(history: List[Dict[str, str]]) -> str:
+    for message in reversed(history):
+        if message.get("role") == "assistant" and message.get("content"):
+            return str(message["content"])
+    return ""
+
+
+def detect_intent(state: TravelState) -> TravelState:
+    llm = _get_llm()
+    prompt = f"""
+{SYSTEM_PROMPT}
+
+请判断用户当前输入的问答意图，只返回 JSON，不要输出 Markdown。
+
+可选 intent：
+- trip_plan: 生成新的完整旅行行程
+- modify_plan: 基于上一轮方案修改行程
+- ask_detail: 追问上一轮方案中的酒店、餐厅、景点、交通或理由
+- compare_options: 比较两个或多个目的地、区域、酒店、餐厅、路线
+- save_preference: 明确要求记住/保存长期偏好
+- knowledge_qa: 询问旅行知识库、城市经验、规则、避坑，不需要实时工具
+
+返回字段：
+- intent: 上述枚举之一
+- reason: 简短原因
+
+最近对话：
+{_conversation_prompt(state.get("conversation_history", []))}
+
+用户输入：
+{state["user_input"]}
+"""
+    try:
+        parsed = _load_json_object(llm.invoke(prompt).content)
+    except json.JSONDecodeError:
+        parsed = {}
+    intent = str(parsed.get("intent") or "trip_plan")
+    if intent not in {
+        "trip_plan",
+        "modify_plan",
+        "ask_detail",
+        "compare_options",
+        "save_preference",
+        "knowledge_qa",
+    }:
+        intent = "trip_plan"
+    return {"intent": intent, "intent_reason": str(parsed.get("reason") or "")}
 
 
 def parse_request(state: TravelState) -> TravelState:
@@ -130,7 +181,7 @@ def parse_request(state: TravelState) -> TravelState:
 
 
 def load_user_profile(state: TravelState) -> TravelState:
-    profile = load_profile()
+    profile = load_profile(state.get("user_id", "local"))
     preferences = dict(profile)
     preferences.update(state.get("preferences") or {})
     return {"preferences": preferences, "user_profile": profile}
@@ -168,13 +219,26 @@ def update_user_profile(state: TravelState) -> TravelState:
     if not isinstance(updates, dict):
         updates = {}
 
-    saved_profile = update_profile(updates) if updates else state.get("user_profile", {})
+    user_id = state.get("user_id", "local")
+    saved_profile = update_profile(updates, user_id) if updates else state.get("user_profile", {})
     preferences = dict(saved_profile)
     preferences.update(state.get("preferences") or {})
     return {
         "profile_updates": updates,
         "user_profile": saved_profile,
         "preferences": preferences,
+    }
+
+
+def retrieve_obsidian_context(state: TravelState) -> TravelState:
+    result = retrieve_knowledge(
+        query=state.get("user_input", ""),
+        destination=state.get("destination", ""),
+        preferences=state.get("preferences", {}),
+    )
+    return {
+        "rag_context": result.get("context", ""),
+        "retrieved_docs": result.get("documents", []),
     }
 
 
@@ -185,14 +249,7 @@ def _has_weather_data(weather: Dict[str, Any]) -> bool:
 
 
 def _meituan_content(meituan_travel: Dict[str, Any]) -> str:
-    content = meituan_travel.get("content")
-    if content:
-        return str(content)
-
-    raw = meituan_travel.get("raw")
-    if isinstance(raw, dict) and raw.get("content"):
-        return str(raw["content"])
-    return ""
+    return meituan_content(meituan_travel)
 
 
 def _chinese_day_number(raw: str) -> Optional[int]:
@@ -337,8 +394,9 @@ def _get_weather_with_fallback(
     destination: str,
     days: Optional[int],
     meituan_travel: Dict[str, Any],
+    weatherdt_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    weather = get_weather(destination, days)
+    weather = weatherdt_result if weatherdt_result is not None else get_weather(destination, days)
     if _has_weather_data(weather):
         return weather
 
@@ -402,20 +460,27 @@ def _finalize_plan_text(plan: str, weather: Dict[str, Any]) -> str:
 def collect_context(state: TravelState) -> TravelState:
     destination = state.get("destination", "")
     preferences = state.get("preferences") or {}
-    weather = _get_weather_with_fallback(destination, state.get("days"), {})
+    weatherdt_result = get_weather(destination, state.get("days"))
     meituan_travel = search_meituan_travel(
         destination,
         state.get("budget"),
         preferences,
         days=state.get("days"),
     )
-    weather = _get_weather_with_fallback(destination, state.get("days"), meituan_travel)
+    weather = _get_weather_with_fallback(
+        destination,
+        state.get("days"),
+        meituan_travel,
+        weatherdt_result,
+    )
+    meituan_entities = extract_meituan_entities(meituan_travel)
     return {
         "weather": weather,
         "weather_summary": _weather_prompt_text(weather),
         "meituan_travel": meituan_travel,
-        "food_options": [meituan_travel],
-        "hotel_options": [meituan_travel],
+        "meituan_entities": meituan_entities,
+        "food_options": meituan_entities.get("restaurants") or [meituan_travel],
+        "hotel_options": meituan_entities.get("hotels") or [meituan_travel],
         "transport_options": search_transport(destination),
         "social_search": search_xiaohongshu(destination, preferences),
     }
@@ -451,6 +516,36 @@ def summarize_social_search(state: TravelState) -> TravelState:
     return {"social_summary": llm.invoke(prompt).content}
 
 
+def answer_lightweight_question(state: TravelState) -> TravelState:
+    llm = _get_llm()
+    intent = state.get("intent", "knowledge_qa")
+    prompt = f"""
+{SYSTEM_PROMPT}
+
+请回答用户的当前问题。这个分支用于轻量问答，不调用实时美团/天气工具。
+
+意图：{intent}
+意图原因：{state.get("intent_reason", "")}
+最近对话：
+{_conversation_prompt(state.get("conversation_history", []))}
+上一轮助手回答：
+{_last_assistant_message(state.get("conversation_history", [])) or "无"}
+用户当前输入：{state["user_input"]}
+长期用户偏好：{json.dumps(state.get("user_profile", {}), ensure_ascii=False)}
+本轮新保存的长期偏好：{json.dumps(state.get("profile_updates", {}), ensure_ascii=False)}
+Obsidian RAG 检索上下文：
+{state.get("rag_context") or "无相关知识库内容"}
+
+回答要求：
+1. 如果是 save_preference，简短确认已保存哪些偏好，不要生成完整行程
+2. 如果是 ask_detail 或 compare_options，优先基于上一轮回答和知识库回答，除非用户明确要求重新规划
+3. 如果是 knowledge_qa，回答要标明“知识库经验/历史沉淀”或“用户偏好”来源
+4. 不要编造实时价格、评分、营业状态、库存；需要实时数据时提醒用户发起完整规划
+5. 默认输出简洁答案，只有用户要求详细时再展开
+"""
+    return {"plan": llm.invoke(prompt).content}
+
+
 def plan_trip(state: TravelState) -> TravelState:
     llm = _get_llm()
     prompt = f"""
@@ -460,6 +555,9 @@ def plan_trip(state: TravelState) -> TravelState:
 
 最近对话：
 {_conversation_prompt(state.get("conversation_history", []))}
+意图：{state.get("intent")}
+上一轮助手回答：
+{_last_assistant_message(state.get("conversation_history", [])) or "无"}
 用户原始需求：{state["user_input"]}
 目的地：{state.get("destination")}
 天数：{state.get("days")}
@@ -469,16 +567,19 @@ def plan_trip(state: TravelState) -> TravelState:
 偏好：{json.dumps(state.get("preferences", {}), ensure_ascii=False)}
 天气：{json.dumps(state.get("weather", {}), ensure_ascii=False)}
 美团酒旅助手原始结果：{json.dumps(state.get("meituan_travel", {}), ensure_ascii=False)}
+美团结构化结果：{json.dumps(state.get("meituan_entities", {}), ensure_ascii=False)}
 餐饮候选：{json.dumps(state.get("food_options", []), ensure_ascii=False)}
 住宿候选：{json.dumps(state.get("hotel_options", []), ensure_ascii=False)}
 交通候选：{json.dumps(state.get("transport_options", []), ensure_ascii=False)}
 小红书搜索摘要：{state.get("social_summary", "")}
+Obsidian RAG 检索上下文：
+{state.get("rag_context") or "无相关知识库内容"}
 
 输出要求：
 1. 按第 1 天、第 2 天这样的格式安排
 2. 每天包含上午、午餐、下午、晚餐、住宿/返程建议
 3. 每天都要结合天气、美团酒旅助手候选、小红书摘要给出取舍理由
-4. 推荐住宿区域、酒店或餐厅时，优先使用美团酒旅助手原始结果里的真实名称、价格、评分、链接；不要编造接口没有返回的价格、评分、空房
+4. 推荐住宿区域、酒店或餐厅时，优先使用“美团结构化结果”里的真实名称、价格、评分、链接；不要编造接口没有返回的价格、评分、空房
 5. 所有具体饭店和酒店推荐都必须保留美团对应链接，优先使用 Markdown 链接格式：[名称](美团链接)；没有链接的候选只能作为区域或类型参考，不要作为具体推荐
 6. 餐厅推荐要更丰富：午餐和晚餐各给1家主推；如果美团返回了足够候选，再额外整理2到3家“可替换餐厅”，写清适合哪一餐、菜系/招牌、位置、评分/价格、美团链接和选择理由
 7. 住宿建议要详细：至少给1家主推酒店，并尽量给2到3家备选；每家写清商圈/位置、交通便利性、价格、评分、档次/星级、房型或设施亮点、适合人群、优缺点和美团预订链接
@@ -487,12 +588,33 @@ def plan_trip(state: TravelState) -> TravelState:
 10. 如果预算已提供，给出三大类预算拆分：住宿、餐饮、交通/门票
 11. 如果任一实时接口未配置或调用失败，在文末用“数据说明”简短说明，不要把它包装成真实数据
 12. 如果天气 provider 是 meituan_travel_weather，说明 WeatherDT 未返回可用数据，但已使用美团酒旅助手返回的天气日期数据作为天气依据，不要再说天气完全缺失
+13. 使用 Obsidian RAG 内容时必须标注它是“知识库经验/历史沉淀”，不要把其中的旧价格、旧评分、旧营业时间当作实时数据
+14. 如果意图是 modify_plan，要明确说明相对上一轮方案改了什么，并尽量复用上一轮仍然有效的信息
 """
     return {"plan": llm.invoke(prompt).content}
 
 
 def final_answer(state: TravelState) -> TravelState:
-    return {"final_answer": _finalize_plan_text(state.get("plan", ""), state.get("weather", {}))}
+    answer = _finalize_plan_text(state.get("plan", ""), state.get("weather", {}))
+    try:
+        knowledge_update = save_turn_knowledge({**state, "final_answer": answer}, answer)
+    except Exception as exc:
+        knowledge_update = {"enabled": False, "error": str(exc)}
+
+    if knowledge_update.get("enabled"):
+        suggestions = knowledge_update.get("suggestions") or []
+        suggestion_text = "\n".join(f"- {item}" for item in suggestions[:3])
+        answer = (
+            answer.rstrip()
+            + "\n\n## 知识库更新\n"
+            + f"- 已写入行程笔记：{knowledge_update.get('trip_note_path')}\n"
+            + f"- 已更新城市笔记：{knowledge_update.get('city_note_path')}\n"
+            + f"- 完善建议清单：{knowledge_update.get('suggestions_path')}\n"
+        )
+        if suggestion_text:
+            answer += "\n本次建议优先补充：\n" + suggestion_text
+
+    return {"final_answer": answer, "knowledge_update": knowledge_update}
 
 
 def ask_clarification(state: TravelState) -> TravelState:
@@ -501,22 +623,34 @@ def ask_clarification(state: TravelState) -> TravelState:
 
 
 def route_after_parse(state: TravelState) -> str:
+    if state.get("intent") in {"save_preference", "knowledge_qa", "ask_detail", "compare_options"}:
+        return "load_user_profile"
     if not state.get("destination") or not state.get("days"):
         return "ask_clarification"
     return "load_user_profile"
 
 
+def route_after_retrieve(state: TravelState) -> str:
+    if state.get("intent") in {"save_preference", "knowledge_qa", "ask_detail", "compare_options"}:
+        return "answer_lightweight_question"
+    return "collect_context"
+
+
 builder = StateGraph(TravelState)
+builder.add_node("detect_intent", detect_intent)
 builder.add_node("parse_request", parse_request)
 builder.add_node("load_user_profile", load_user_profile)
 builder.add_node("update_user_profile", update_user_profile)
+builder.add_node("retrieve_obsidian_context", retrieve_obsidian_context)
 builder.add_node("collect_context", collect_context)
 builder.add_node("summarize_social_search", summarize_social_search)
+builder.add_node("answer_lightweight_question", answer_lightweight_question)
 builder.add_node("plan_trip", plan_trip)
 builder.add_node("final_answer", final_answer)
 builder.add_node("ask_clarification", ask_clarification)
 
-builder.add_edge(START, "parse_request")
+builder.add_edge(START, "detect_intent")
+builder.add_edge("detect_intent", "parse_request")
 builder.add_conditional_edges(
     "parse_request",
     route_after_parse,
@@ -526,9 +660,18 @@ builder.add_conditional_edges(
     },
 )
 builder.add_edge("load_user_profile", "update_user_profile")
-builder.add_edge("update_user_profile", "collect_context")
+builder.add_edge("update_user_profile", "retrieve_obsidian_context")
+builder.add_conditional_edges(
+    "retrieve_obsidian_context",
+    route_after_retrieve,
+    {
+        "answer_lightweight_question": "answer_lightweight_question",
+        "collect_context": "collect_context",
+    },
+)
 builder.add_edge("collect_context", "summarize_social_search")
 builder.add_edge("summarize_social_search", "plan_trip")
+builder.add_edge("answer_lightweight_question", "final_answer")
 builder.add_edge("plan_trip", "final_answer")
 builder.add_edge("final_answer", END)
 builder.add_edge("ask_clarification", END)
